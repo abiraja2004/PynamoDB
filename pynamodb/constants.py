@@ -63,6 +63,8 @@ KEY = 'Key'
 
 # Expression Parameters
 EXPRESSION_ATTRIBUTE_NAMES = 'ExpressionAttributeNames'
+EXPRESSION_ATTRIBUTE_VALUES = 'ExpressionAttributeValues'
+KEY_CONDITION_EXPRESSION = 'KeyConditionExpression'
 PROJECTION_EXPRESSION = 'ProjectionExpression'
 
 # Defaults
@@ -140,8 +142,17 @@ STREAM_OLD_IMAGE = 'OLD_IMAGE'
 STREAM_NEW_AND_OLD_IMAGE = 'NEW_AND_OLD_IMAGES'
 STREAM_KEYS_ONLY = 'KEYS_ONLY'
 
-# These are constants used in the KeyConditions parameter
-# See: http://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_Query.html#DDB-Query-request-KeyConditions
+# These are constants used in the KeyConditionExpression parameter
+# http://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_Query.html#DDB-Query-request-KeyConditionExpression
+COND_EQ = '='
+COND_LT = '<'
+COND_LE = '<='
+COND_GT = '>'
+COND_GE = '>='
+COND_BEGINS_WITH = 'begins_with'
+COND_BETWEEN = 'BETWEEN'
+KEY_CONDITION_EXPRESSION_OPS = [COND_EQ, COND_LT, COND_LE, COND_GT, COND_GE, COND_BEGINS_WITH, COND_BETWEEN]
+
 EXCLUSIVE_START_KEY = 'ExclusiveStartKey'
 LAST_EVALUATED_KEY = 'LastEvaluatedKey'
 QUERY_FILTER = 'QueryFilter'
@@ -154,16 +165,14 @@ LT = 'LT'
 GE = 'GE'
 GT = 'GT'
 IN = 'IN'
-KEY_CONDITIONS = 'KeyConditions'
-COMPARISON_OPERATOR_VALUES = [EQ, LE, LT, GE, GT, BEGINS_WITH, BETWEEN]
 QUERY_OPERATOR_MAP = {
-    'eq': EQ,
-    'le': LE,
-    'lt': LT,
-    'ge': GE,
-    'gt': GT,
-    'begins_with': BEGINS_WITH,
-    'between': BETWEEN
+    'eq': COND_EQ,
+    'le': COND_LE,
+    'lt': COND_LT,
+    'ge': COND_GE,
+    'gt': COND_GT,
+    'begins_with': COND_BEGINS_WITH,
+    'between': COND_BETWEEN
 }
 
 # These are the valid select values for the Scan operation

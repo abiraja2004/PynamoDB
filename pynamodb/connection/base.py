@@ -22,10 +22,10 @@ from six.moves import range
 from pynamodb.compat import NullHandler
 from pynamodb.connection.util import pythonic
 from pynamodb.constants import (
-    RETURN_CONSUMED_CAPACITY_VALUES, RETURN_ITEM_COLL_METRICS_VALUES, COMPARISON_OPERATOR_VALUES,
+    RETURN_CONSUMED_CAPACITY_VALUES, RETURN_ITEM_COLL_METRICS_VALUES, KEY_CONDITION_EXPRESSION_OPS,
     RETURN_ITEM_COLL_METRICS, RETURN_CONSUMED_CAPACITY, RETURN_VALUES_VALUES, ATTR_UPDATE_ACTIONS,
     COMPARISON_OPERATOR, EXCLUSIVE_START_KEY, SCAN_INDEX_FORWARD, SCAN_FILTER_VALUES, ATTR_DEFINITIONS,
-    BATCH_WRITE_ITEM, CONSISTENT_READ, ATTR_VALUE_LIST, DESCRIBE_TABLE, KEY_CONDITIONS,
+    BATCH_WRITE_ITEM, CONSISTENT_READ, ATTR_VALUE_LIST, DESCRIBE_TABLE, KEY_CONDITION_EXPRESSION,
     BATCH_GET_ITEM, DELETE_REQUEST, SELECT_VALUES, RETURN_VALUES, REQUEST_ITEMS, ATTR_UPDATES,
     PROJECTION_EXPRESSION, SERVICE_NAME, DELETE_ITEM, PUT_REQUEST, UPDATE_ITEM, SCAN_FILTER, TABLE_NAME,
     INDEX_NAME, KEY_SCHEMA, ATTR_NAME, ATTR_TYPE, TABLE_KEY, EXPECTED, KEY_TYPE, GET_ITEM, UPDATE,
@@ -36,7 +36,8 @@ from pynamodb.constants import (
     CONSUMED_CAPACITY, CAPACITY_UNITS, QUERY_FILTER, QUERY_FILTER_VALUES, CONDITIONAL_OPERATOR,
     CONDITIONAL_OPERATORS, NULL, NOT_NULL, SHORT_ATTR_TYPES, DELETE,
     ITEMS, DEFAULT_ENCODING, BINARY_SHORT, BINARY_SET_SHORT, LAST_EVALUATED_KEY, RESPONSES, UNPROCESSED_KEYS,
-    UNPROCESSED_ITEMS, STREAM_SPECIFICATION, STREAM_VIEW_TYPE, STREAM_ENABLED, EXPRESSION_ATTRIBUTE_NAMES)
+    UNPROCESSED_ITEMS, STREAM_SPECIFICATION, STREAM_VIEW_TYPE, STREAM_ENABLED,
+    EXPRESSION_ATTRIBUTE_NAMES, EXPRESSION_ATTRIBUTE_VALUES, COND_BETWEEN, COND_BEGINS_WITH)
 from pynamodb.exceptions import (
     TableError, QueryError, PutError, DeleteError, UpdateError, GetError, ScanError, TableDoesNotExist,
     VerboseClientError
@@ -1198,11 +1199,53 @@ class Connection(object):
         """
         operation_kwargs = {TABLE_NAME: table_name}
         name_placeholders = {}
+        expression_attribute_values = {}
+
+        # Create KeyConditionExpression
+        tbl = self.get_meta_table(table_name)
+        if tbl is None:
+            raise TableError("No such table: {0}".format(table_name))
+        if index_name:
+            hash_keyname = tbl.get_index_hash_keyname(index_name)
+            if not hash_keyname:
+                raise ValueError("No hash key attribute for index: {0}".format(index_name))
+        else:
+            hash_keyname = tbl.hash_keyname
+        # TODO: refactor to use condition expression context when it is available
+        pk_name = _substitute_names(hash_keyname, name_placeholders)
+        pk_value = self._get_value_placeholder(table_name, hash_keyname, hash_key, expression_attribute_values)
+        key_condition_expression =  "{0} = {1}".format(pk_name, pk_value)
+        if key_conditions is None or len(key_conditions) == 0:
+            pass  # No comparisons on sort key
+        elif len(key_conditions) > 1:
+            raise ValueError("Multiple attributes are not supported in key_conditions: {0}".format(key_conditions))
+        else:
+            (key, condition), = key_conditions.items()
+            operator = condition.get(COMPARISON_OPERATOR)
+            if operator not in KEY_CONDITION_EXPRESSION_OPS:
+                raise ValueError("{0} must be one of {1}".format(COMPARISON_OPERATOR, KEY_CONDITION_EXPRESSION_OPS))
+            sk_name = _substitute_names(key, name_placeholders)
+            sk_value_list = [
+                self._get_value_placeholder(table_name, key, value, expression_attribute_values)
+                for value in condition.get(ATTR_VALUE_LIST)
+            ]
+            if len(sk_value_list) == 2 and operator == COND_BETWEEN:
+                key_condition_expression = key_condition_expression + " AND {0} {1} {2} AND {3}".format(
+                    sk_name, operator, sk_value_list[0], sk_value_list[1])
+            elif len(sk_value_list) == 1:
+                sk_value = sk_value_list[0]
+                if operator == COND_BEGINS_WITH:
+                    sort_key_expression = " AND {0} ({1}, {2})".format(operator, sk_name, sk_value)
+                else:
+                    sort_key_expression = " AND {0} {1} {2}".format(sk_name, operator, sk_value)
+                key_condition_expression = key_condition_expression + sort_key_expression
+            else:
+                raise ValueError("invalid key_conditions: {0}".format(key_conditions))
+        operation_kwargs[KEY_CONDITION_EXPRESSION] = key_condition_expression
+
         if attributes_to_get:
             projection_expression = self._get_projection_expression(attributes_to_get, name_placeholders)
             operation_kwargs[PROJECTION_EXPRESSION] = projection_expression
-        if name_placeholders:
-            operation_kwargs[EXPRESSION_ATTRIBUTE_NAMES] = self._reverse_dict(name_placeholders)
         if consistent_read:
             operation_kwargs[CONSISTENT_READ] = True
         if exclusive_start_key:
@@ -1223,44 +1266,21 @@ class Connection(object):
             operation_kwargs[SELECT] = str(select).upper()
         if scan_index_forward is not None:
             operation_kwargs[SCAN_INDEX_FORWARD] = scan_index_forward
-        tbl = self.get_meta_table(table_name)
-        if tbl is None:
-            raise TableError("No such table: {0}".format(table_name))
-        if index_name:
-            hash_keyname = tbl.get_index_hash_keyname(index_name)
-            if not hash_keyname:
-                raise ValueError("No hash key attribute for index: {0}".format(index_name))
-        else:
-            hash_keyname = tbl.hash_keyname
-        operation_kwargs[KEY_CONDITIONS] = {
-            hash_keyname: {
-                ATTR_VALUE_LIST: [
-                    {
-                        self.get_attribute_type(table_name, hash_keyname): hash_key,
-                    }
-                ],
-                COMPARISON_OPERATOR: EQ
-            },
-        }
-        if key_conditions is not None:
-            for key, condition in key_conditions.items():
-                attr_type = self.get_attribute_type(table_name, key)
-                operator = condition.get(COMPARISON_OPERATOR)
-                if operator not in COMPARISON_OPERATOR_VALUES:
-                    raise ValueError("{0} must be one of {1}".format(COMPARISON_OPERATOR, COMPARISON_OPERATOR_VALUES))
-                operation_kwargs[KEY_CONDITIONS][key] = {
-                    ATTR_VALUE_LIST: [
-                        {
-                            attr_type: self.parse_attribute(value)
-                        } for value in condition.get(ATTR_VALUE_LIST)
-                    ],
-                    COMPARISON_OPERATOR: operator
-                }
+        if name_placeholders:
+            operation_kwargs[EXPRESSION_ATTRIBUTE_NAMES] = self._reverse_dict(name_placeholders)
+        if expression_attribute_values:
+            operation_kwargs[EXPRESSION_ATTRIBUTE_VALUES] = expression_attribute_values
 
         try:
             return self.dispatch(QUERY, operation_kwargs)
         except BOTOCORE_EXCEPTIONS as e:
             raise QueryError("Failed to query items: {0}".format(e), e)
+
+    def _get_value_placeholder(self, table_name, attribute_name, value, expression_attribute_values):
+        attr_type = self.get_attribute_type(table_name, attribute_name)
+        placeholder = ':' + str(len(expression_attribute_values))
+        expression_attribute_values[placeholder] = {attr_type: self.parse_attribute(value)}
+        return placeholder
 
     @staticmethod
     def _get_projection_expression(attributes_to_get, placeholders):
